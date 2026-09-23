@@ -239,6 +239,7 @@ function releaseAudio() {
 }
 
 function stopSession(notifyServer = true) {
+  finishInterruptedTranscripts();
   generation += 1;
   if (notifyServer) send({ type: 'stop' });
   const oldSocket = socket;
@@ -486,6 +487,7 @@ function handleMessage(message, token) {
       playAudio(message, token);
       break;
     case 'interrupt':
+      finishInterruptedTranscripts(message.turnId);
       if (message.turnId !== undefined) blockedTurns.add(String(message.turnId));
       flushPlayback();
       break;
@@ -511,7 +513,17 @@ function handleMessage(message, token) {
   }
 }
 
+function finishInterruptedTranscripts(turnId) {
+  for (const [key, item] of messages) {
+    if (turnId !== undefined && !key.startsWith(`${turnId}:`)) continue;
+    if (!item.wrapper.classList.contains('pending')) continue;
+    item.wrapper.classList.remove('pending');
+    item.progress.textContent = 'Прервано';
+    item.progress.hidden = false;
+  }
+}
 function renderTranscript(message) {
+  if (message.role === 'assistant' && blockedTurns.has(String(message.turnId ?? ''))) return;
   if (!['user', 'assistant'].includes(message.role) || typeof message.text !== 'string') return;
   const key = `${message.turnId ?? ''}:${message.role}`;
   let item = messages.get(key);

@@ -1,0 +1,14 @@
+{
+  "name": "voice-router-doter",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Native voice scenario routing for Saqta Insurance",
+  "engines": { "node": ">=22.9.0" },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env server.mjs",
+    "test": "node --test",
+    "evaluate": "node --env-file-if-exists=.env tools/evaluate.mjs"
+  },
+  "dependencies": { "ws": "^8.18.3" }
+}
