@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#152c44">
+  <title>Voice Router — Saqta Insurance</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E%3Crect width='48' height='48' rx='14' fill='%23152c44'/%3E%3Cpath d='M13 24h3m4-8v16m8-21v26m8-17v8' stroke='%235fd3bf' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="Voice Router, главная">
+      <span class="brand-icon" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="M7 14v4m6-10v16m6-19v22m6-15v8"/></svg></span>
+      <span>Voice Router<span class="brand-subtitle">SAQTA INSURANCE</span></span>
+    </a>
+    <div class="topbar-right"><span class="demo-label">Учебная среда</span><span class="team-label">команда doter</span></div>
+  </header>
+
+  <main class="workspace">
+    <div class="page-heading">
+      <div><h1>Голосовой ассистент</h1><p class="page-description">Говорите или пишите. Сценарии и действия — рядом с диалогом.</p></div>
+      <div class="dataset-label"><span class="tiny-dot"></span>Дата данных <strong id="as-of-date">01.10.2026</strong></div>
+    </div>
+
+    <div id="notice" class="notice" role="status" hidden><span id="notice-text"></span><button id="dismiss-notice" type="button" aria-label="Скрыть сообщение">×</button></div>
+
+        <section class="card session-card" aria-label="Подключение и управление разговором"><div class="session-setup">
+          <div class="card-heading"><h2>Подключение</h2><span id="connection-badge" class="badge neutral" role="status"><span class="status-dot"></span><span id="connection-label">Не подключён</span></span></div>
+          <div class="provider-row">
+            <div class="provider-field"><label for="provider">Провайдер</label><select id="provider"><option value="openai">OpenAI Realtime</option><option value="gemini">Gemini Live</option></select></div>
+            <div class="provider-field model-field"><label for="model">Модель</label><select id="model" aria-describedby="provider-availability" disabled><option value="">Загружаем список…</option></select></div>
+            <div class="model-info"><span id="provider-availability" class="availability">Проверяем конфигурацию…</span><span id="provider-model" class="model-name">—</span></div>
+          </div>
+          </div><div class="session-activity"><div class="voice-stage" id="voice-stage">
+            <div class="voice-orb" id="voice-orb" aria-hidden="true"><svg viewBox="0 0 48 48"><path d="M10 21v6m7-13v20m7-25v30m7-22v14m7-10v6"/></svg></div>
+            <div class="voice-caption"><h3 id="voice-title">Начните с голоса</h3><p id="voice-description">Разрешите доступ к микрофону и расскажите, чем помочь.</p></div>
+            <div class="waveform" id="waveform" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+          </div>
+          <div class="session-controls">
+            <button id="start" class="button primary" type="button" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 11v1a7 7 0 0 0 14 0v-1M12 19v3m-3 0h6"/></svg><span>Начать разговор</span></button>
+            <button id="start-text" class="button secondary" type="button" disabled>Без микрофона</button>
+            <button id="mute" class="button secondary" type="button" aria-pressed="false" hidden>Выключить микрофон</button>
+            <button id="stop" class="button stop" type="button" hidden><span class="stop-square" aria-hidden="true"></span>Завершить</button>
+          </div>
+          <p class="session-footnote" id="session-footnote">Во время разговора аудио передаётся выбранному провайдеру.</p>
+        </div></section>
+
+    <div class="dashboard">
+      <section class="conversation-column" aria-label="Разговор с ассистентом">
+
+        <section class="card conversation-card">
+          <div class="card-heading"><div class="heading-with-count"><h2>Диалог</h2><span id="message-count" class="counter">0</span></div><button id="reset" class="text-button" type="button" title="Очистить диалог и завершить подключение"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11a9 9 0 1 1 2 7M3 4v7h7"/></svg>Новый диалог</button></div>
+          <div id="transcript" class="transcript" role="log" aria-label="Транскрипт разговора" aria-live="polite" aria-relevant="additions text">
+            <div id="conversation-empty" class="conversation-empty"><span class="empty-icon" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="M27 15a11 11 0 0 1-11 11H5l2-6a11 11 0 1 1 20-5Z"/><path d="M11 12h10m-10 5h7"/></svg></span><h3>Начнём с вашего вопроса</h3><p>Говорите по-русски, қазақша или пишите.</p></div>
+          </div>
+          <div class="composer-area">
+            <div class="example-prompts" aria-label="Примеры реплик"><button type="button" class="prompt-chip" data-prompt="Хочу узнать статус моего полиса">Статус полиса</button><button type="button" class="prompt-chip" data-prompt="Я попал в ДТП. Что мне делать?">Произошло ДТП</button><button type="button" class="prompt-chip" data-prompt="Сақтандыру полисім туралы білгім келеді">Қазақша сұрау</button></div>
+            <form id="text-form" class="composer"><label class="visually-hidden" for="text-input">Текст сообщения</label><textarea id="text-input" placeholder="Или напишите сообщение…" rows="1" maxlength="4000"></textarea><button id="send" type="submit" aria-label="Отправить сообщение" title="Отправить сообщение" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 12 16-8-5 16-4-7-7-1Zm7 1 9-9"/></svg></button></form>
+            <p class="composer-hint"><span id="text-hint">Сначала подключите голосовой или текстовый канал</span><span>Enter ↵</span></p>
+          </div>
+        </section>
+      </section>
+
+      <aside class="inspection-column" aria-label="Объяснение маршрута">
+
+        <section class="card route-card">
+          <div class="card-heading"><h2>Маршрут реплики</h2><span id="route-status" class="badge neutral">Ожидание</span></div>
+          <div id="route-empty" class="panel-empty"><span class="route-symbol" aria-hidden="true">↗</span><p>Решение после каждой реплики</p><span>Здесь появятся выбранные LLM сценарии,<br>объяснение, уверенность и альтернативы.</span></div>
+          <div id="route-results" hidden><div class="route-meta"><span id="trace-language">Язык: —</span><span id="trace-turn">Реплика —</span></div><div id="scenarios" class="scenarios"></div><div class="alternatives-section"><h3 class="section-label">Альтернативы</h3><div id="alternatives" class="alternatives"></div></div></div>
+        </section>
+
+        <section class="card actions-card">
+          <div class="card-heading"><h2>Действия</h2><span id="action-count" class="counter">0</span></div>
+
+          <div id="confirmation" class="confirmation" role="region" aria-label="Подтверждение действия" aria-live="polite" hidden><span class="confirmation-eyebrow">ТРЕБУЕТСЯ ПОДТВЕРЖДЕНИЕ</span><p id="confirmation-description"></p><details id="confirmation-details"><summary>Детали действия</summary><pre id="confirmation-data"></pre></details><div class="confirmation-buttons"><button id="approve" class="button primary" type="button">Подтвердить</button><button id="reject" class="button secondary" type="button">Отменить</button></div></div>
+          <div id="actions" class="actions"><p class="inline-empty">Выполненные действия и запросы на подтверждение.</p></div>
+        </section>
+
+        <section class="card facts-card">
+          <div class="card-heading"><h2>Контекст и данные</h2><span id="slot-count" class="counter">0</span></div>
+          <div id="slots" class="slots"><p class="inline-empty">Извлечённые данные появятся здесь.</p></div>
+          <div class="state-summary"><div><span>Активный сценарий</span><strong id="active-scenario">—</strong></div><div><span>В очереди</span><strong id="queued-scenarios">—</strong></div></div>
+          <details class="state-details"><summary>Состояние на сервере<span aria-hidden="true">⌄</span></summary><pre id="server-state">Сессия ещё не началась.</pre></details>
+        </section>
+
+        <section class="card metrics-card">
+          <div class="card-heading"><h2>Скорость ответа</h2><span class="quiet-label">реальные замеры</span></div>
+          <div class="metrics-grid"><div class="metric"><span title="От окончания речи (VAD) на сервере или получения отправленного текста до уведомления браузера о начале воспроизведения; включает передачу событий">До голосового ответа</span><strong id="metric-first">—</strong></div><div class="metric"><span>Маршрутизация</span><strong id="metric-route">—</strong></div><div class="metric"><span>Выполнение действий</span><strong id="metric-backend">—</strong></div><div class="metric"><span>До транскрипта</span><strong id="metric-transcript">—</strong></div></div>
+          <p class="metrics-note">Для голоса — от окончания речи (VAD) на сервере, для текста — от получения реплики. До уведомления браузера о начале воспроизведения, включая передачу событий. Отдельные STT/TTS не измеряются; это не акустический замер.</p>
+        </section>
+      </aside>
+    </div>
+    <footer class="footer"><span><strong>Saqta Insurance</strong> · вымышленная страховая компания</span><span id="catalog-summary">40 сценариев · 3 системных намерения · RU / KK</span></footer>
+  </main>
+</body>
+</html>
