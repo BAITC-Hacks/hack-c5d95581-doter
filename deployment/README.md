@@ -18,10 +18,9 @@ docker compose --env-file /opt/hackalem-voice-router/.env -p hackalem-voice-rout
 ```
 
 nginx configuration is in `deployment/nginx.conf`. Use a separate virtual host;
-validate with `nginx -t` before reloading. Its Basic Auth credential is generated
-outside Git, stored as a password hash on the server, and shared privately with
-judges. It protects the paid voice APIs as well as the demo page. Session history
-additionally requires the owning browser's HTTP-only cookie.
+validate with `nginx -t` before reloading. The demo is public and opens without
+a login or password. Session history requires the owning browser's HTTP-only
+cookie; another browser cannot read it.
 
 Certbot obtains and renews the TLS certificate with the webroot
 `/opt/hackalem-voice-router/acme`. Keep the HTTP challenge location accessible and
@@ -29,7 +28,7 @@ reload nginx after renewal.
 
 ## Verification and rollback
 
-Verify the container health, authenticated HTTPS response and WebSocket upgrade,
+Verify the container health, public HTTPS response and WebSocket upgrade,
 then check that an audit session survives application and PostgreSQL restarts.
 Confirm a different browser cannot read another browser's history. Voice-provider
 calls are separate paid checks; a healthy HTTP response does not prove acoustic quality.
