@@ -10,6 +10,7 @@ import { buildInstructions, makeToolSchema } from './lib/prompts.mjs';
 import { createSession, processTurn } from './lib/engine.mjs';
 import { connectProvider } from './lib/providers.mjs';
 import { discoverModels } from './lib/models.mjs';
+import { providerGuidance, withModelGuidance } from './lib/model-guidance.mjs';
 
 const publicRoot = path.resolve(fileURLToPath(new URL('./public/', import.meta.url)));
 const mime = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.ico': 'image/x-icon' };
@@ -21,7 +22,7 @@ export function createApp({ data = loadData(), connect = connectProvider, env = 
     openai: { apiKey: env.OPENAI_API_KEY || '', model: env.OPENAI_REALTIME_MODEL || 'gpt-realtime-2.1', inputSampleRate: 24000 },
     gemini: { apiKey: env.GEMINI_API_KEY || env.GOOGLE_API_KEY || '', model: env.GEMINI_LIVE_MODEL || 'gemini-3.8-live', inputSampleRate: 16000 },
   };
-  const config = { providers: Object.fromEntries(Object.entries(settings).map(([name, s]) => [name, { configured: Boolean(s.apiKey.trim()), model: s.model, models: [{ id: s.model, label: s.model }], verified: false }])), catalog: publicCatalog(data), asOfDate: data.scenarios.meta.as_of_date };
+  const config = { providers: Object.fromEntries(Object.entries(settings).map(([name, s]) => [name, { configured: Boolean(s.apiKey.trim()), model: s.model, models: withModelGuidance([{ id: s.model, label: s.model }]), guidance: providerGuidance(name), verified: false }])), catalog: publicCatalog(data), asOfDate: data.scenarios.meta.as_of_date };
   const instructions = buildInstructions(data);
   const toolSchema = makeToolSchema(data);
   const active = new Set();
@@ -266,7 +267,7 @@ export function createApp({ data = loadData(), connect = connectProvider, env = 
   async function refreshModels() {
     await Promise.all(Object.entries(settings).map(async ([name, s]) => {
       const discovered = await modelDiscovery(name, s.apiKey, s.model);
-      Object.assign(config.providers[name], discovered);
+      Object.assign(config.providers[name], discovered, { models: withModelGuidance(discovered.models) });
       if (!discovered.models.some(m => m.id === config.providers[name].model)) config.providers[name].model = discovered.models[0]?.id || s.model;
     }));
   }
