@@ -390,3 +390,42 @@ test('policy knowledge refuses deductible definitions and answers explicit amoun
   assert.match(out.reply,/0, 50000, 100000/);
  }
 });
+
+
+test('captured model topics preserve exclusion meaning and exact knowledge facts',()=>{
+ const request='КАСКО бойынша көлікке қандай жағдайда төлем жасамайсыздар?';
+ for(const [topic,confidence]of [
+  ['непокрываемые риски',1],
+  ['КАСКО бойынша төлем жасалмайтын жағдайлар',.78]
+ ]){
+  const out=turn(createSession(data),'SC40',{product_type:'casco',topic},{language:'kk',
+   scenarios:[{scenario_id:'SC40',confidence,reason:'Exclusion question'}]},request);
+  const lookup=out.trace.actions.find(a=>a.name==='kb_lookup').result;
+  assert.equal(out.trace.status,'completed',topic);
+  assert.deepEqual(lookup.sources,['knowledge_base.json#/products/casco/exclusions']);
+  assert.deepEqual(lookup.facts,[{path:'knowledge_base.json#/products/casco/exclusions',value:data.knowledge.products.casco.exclusions}]);
+  assert.equal(out.reply,lookup.answer);
+  assert.match(out.reply,/мас күйінде көлік жүргізу/);
+  assert.doesNotMatch(out.reply,/Қамту|Стандарт:|Лайт:/);
+ }
+});
+
+test('spaced Russian and passive Kazakh negation precede positive coverage',()=>{
+ for(const [language,topic]of [
+  ['ru','не покрываемые риски'],['ru','Какие риски не покрываются?'],
+  ['kk','Қамтылмайтын жағдайлар'],['kk','Өтелмейтін жағдайлар'],
+  ['kk','Төлем төленбейтін жағдайлар'],['kk','Төлем жасалмайды']
+ ]){
+  const out=turn(createSession(data),'SC40',{product_type:'casco',topic},{language},topic);
+  const lookup=out.trace.actions.find(a=>a.name==='kb_lookup').result;
+  assert.equal(out.trace.status,'completed',topic);
+  assert.deepEqual(lookup.sources,['knowledge_base.json#/products/casco/exclusions'],topic);
+  assert.deepEqual(lookup.facts[0].value,data.knowledge.products.casco.exclusions);
+ }
+ for(const [language,topic]of [['ru','Какие риски покрываются?'],['kk','Қандай жағдайларды қамтиды?']]){
+  const out=turn(createSession(data),'SC40',{product_type:'casco',topic},{language},topic);
+  const lookup=out.trace.actions.find(a=>a.name==='kb_lookup').result;
+  assert.equal(out.trace.status,'completed',topic);
+  assert.deepEqual(lookup.sources,['knowledge_base.json#/products/casco/packages/Standard','knowledge_base.json#/products/casco/packages/Lite']);
+ }
+});

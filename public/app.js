@@ -2,7 +2,8 @@
 
 const byId = (id) => document.getElementById(id);
 const ui = Object.fromEntries([
-  'provider', 'model', 'provider-availability', 'provider-model', 'start', 'start-text', 'mute',
+  'provider', 'model', 'provider-tag', 'provider-summary', 'provider-detail', 'provider-source',
+  'model-tag', 'model-summary', 'model-detail', 'model-source', 'model-guide-list', 'provider-availability', 'provider-model', 'start', 'start-text', 'mute',
   'stop', 'reset', 'send', 'text-form', 'text-input', 'text-hint', 'notice',
   'notice-text', 'dismiss-notice', 'connection-badge', 'connection-label',
   'voice-stage', 'voice-title', 'voice-description', 'session-footnote',
@@ -88,23 +89,78 @@ function availableProvider() {
   return config?.providers?.[ui.provider.value]?.configured === true && Boolean(ui.model.value);
 }
 
+function modelOptions(provider) {
+  const configured = Array.isArray(provider?.models) ? provider.models
+    : provider?.model ? [{ id: provider.model, label: provider.model }] : [];
+  const models = new Map();
+  for (const model of configured) {
+    if (typeof model?.id !== 'string' || !model.id.trim()) continue;
+    models.set(model.id, {
+      ...model,
+      label: typeof model.label === 'string' && model.label.trim() ? model.label : model.id
+    });
+  }
+  return models;
+}
+
+function guidanceText(value) {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function renderGuidance(prefix, guidance, fallback) {
+  const tag = guidanceText(guidance?.tag);
+  ui[`${prefix}-tag`].textContent = tag;
+  ui[`${prefix}-tag`].hidden = !tag;
+  ui[`${prefix}-summary`].textContent = guidanceText(guidance?.summary) || fallback;
+  ui[`${prefix}-detail`].textContent = guidanceText(guidance?.detail);
+  const source = ui[`${prefix}-source`];
+  source.hidden = true;
+  source.removeAttribute('href');
+  try {
+    const url = new URL(guidance?.sourceUrl);
+    if (url.protocol === 'https:' && !url.username && !url.password) {
+      source.href = url.href;
+      source.hidden = false;
+    }
+  } catch { /* Guidance may have no published source. */ }
+}
+
+function renderModelGuidance() {
+  const provider = config?.providers?.[ui.provider.value];
+  const models = modelOptions(provider);
+  const selected = models.get(ui.model.value);
+  renderGuidance('provider', provider?.guidance, 'Голосовой провайдер для текущей сессии.');
+  renderGuidance('model', selected?.guidance, 'Для этой модели пока нет сравнительной подсказки.');
+  ui['model-detail'].hidden = !ui['model-detail'].textContent;
+  ui['provider-detail'].hidden = !ui['provider-detail'].textContent;
+  ui['provider-model'].textContent = ui.model.value || 'Модель не указана';
+  ui['model-guide-list'].replaceChildren();
+  for (const model of models.values()) {
+    const current = model.id === ui.model.value;
+    const row = element('li', `model-guide-item${current ? ' selected' : ''}`);
+    const heading = element('div', 'model-guide-heading');
+    const title = element('strong', '', model.label);
+    title.setAttribute('translate', 'no');
+    if (current) title.append(element('span', 'visually-hidden', ' — выбрана'));
+    heading.append(title);
+    const tag = guidanceText(model.guidance?.tag);
+    if (tag) heading.append(element('span', 'guide-tag', tag));
+    row.append(heading, element('p', '', guidanceText(model.guidance?.summary) || 'Сравнительная подсказка пока не опубликована.'));
+    ui['model-guide-list'].append(row);
+  }
+}
+
 function renderProvider() {
   const providerName = ui.provider.value;
   const provider = config?.providers?.[providerName];
-  const configuredModels = Array.isArray(provider?.models) ? provider.models
-    : provider?.model ? [{ id: provider.model, label: provider.model }] : [];
-  const models = new Map();
-  for (const model of configuredModels) {
-    if (typeof model?.id === 'string' && model.id.trim()) {
-      models.set(model.id, typeof model.label === 'string' && model.label.trim() ? model.label : model.id);
-    }
-  }
+  const models = modelOptions(provider);
   const remembered = selectedModels.get(providerName);
   const selected = models.has(remembered) ? remembered
     : models.has(provider?.model) ? provider.model : models.keys().next().value || '';
   ui.model.replaceChildren();
-  for (const [id, label] of models) {
-    const option = element('option', '', label);
+  for (const [id, model] of models) {
+    const tag = guidanceText(model.guidance?.tag);
+    const option = element('option', '', `${model.label}${tag ? ` · ${tag}` : ''}`);
     option.value = id;
     ui.model.append(option);
   }
@@ -115,7 +171,7 @@ function renderProvider() {
   }
   ui.model.value = selected;
   selectedModels.set(providerName, selected);
-  ui['provider-model'].textContent = selected || 'Модель не указана';
+  renderModelGuidance();
   ui['provider-availability'].textContent = provider?.configured
     ? 'Ключ настроен на сервере' : 'API-ключ не настроен';
   ui['provider-availability'].className = `availability ${provider?.configured ? 'available' : 'unavailable'}`;
@@ -471,6 +527,14 @@ function playAudio(message, token) {
 
 function handleMessage(message, token) {
   switch (message.type) {
+    case 'history': {
+      if (/^\/history\.html\?id=[a-f0-9-]{36}$/i.test(message.url || '')) {
+        const link = byId('history-link'); link.href = message.url; link.hidden = false;
+        byId('history-storage').textContent = message.persistent ? 'История сохраняется в PostgreSQL' : 'История в памяти до перезапуска';
+        try { localStorage.setItem('voice-router:last-history', message.url); } catch { /* storage can be disabled */ }
+      }
+      break;
+    }
     case 'status':
       if (message.status === 'ready') {
         inputSampleRate = message.inputSampleRate === 16000 ? 16000 : 24000;
@@ -532,7 +596,7 @@ function renderTranscript(message) {
     ui['conversation-empty'].hidden = true;
     const wrapper = element('article', `message ${message.role}`);
     const label = element('div', 'message-label');
-    label.append(element('strong', '', message.role === 'user' ? 'Вы' : 'Saqta · ассистент'));
+    label.append(element('strong', '', message.role === 'user' ? 'Вы' : 'VoiceRouter'));
     const time = element('time', '', new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }));
     label.append(time);
     const bubble = element('div', 'message-bubble');
@@ -724,7 +788,7 @@ ui.provider.addEventListener('change', renderProvider);
 ui.model.addEventListener('change', () => {
   if (phase !== 'stopped') return;
   selectedModels.set(ui.provider.value, ui.model.value);
-  ui['provider-model'].textContent = ui.model.value || 'Модель не указана';
+  renderModelGuidance();
   updateControls();
 });
 ui['dismiss-notice'].addEventListener('click', hideNotice);
@@ -815,3 +879,8 @@ async function loadConfig() {
 }
 
 loadConfig();
+
+try {
+  const previous = localStorage.getItem('voice-router:last-history');
+  if (/^\/history\.html\?id=[a-f0-9-]{36}$/i.test(previous || '')) { byId('history-link').href = previous; byId('history-link').hidden = false; }
+} catch { /* browser storage is optional */ }

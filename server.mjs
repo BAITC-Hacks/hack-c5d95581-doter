@@ -210,6 +210,9 @@ export function createApp({ data = loadData(), connect = connectProvider, env = 
                 turn.historyRecord.trace.transcript_source = 'provider';
                 persistTurn(turn);
               }
+            } else if (event.role === 'assistant' && event.final && turn.historyRecord && typeof event.text === 'string') {
+              turn.historyRecord.trace.spoken_transcript = event.text;
+              persistTurn(turn);
             }
             send({ ...event, turnId: turn.id });
             if (event.final) send({ type: 'metrics', turnId: turn.id, latency_ms: metrics(turn) });

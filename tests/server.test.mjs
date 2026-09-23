@@ -250,6 +250,7 @@ test('late final ASR updates saved text and metrics while retaining the exact ro
   await c.wait(event => event.type === 'audio');
   c.send({ type: 'playback_started', turnId: trace.turnId });
   const played = await c.wait(event => event.type === 'metrics' && event.latency_ms.end_to_first_audio !== null);
+  callbacks.onEvent({ type: 'transcript', role: 'assistant', itemId: 'output-a', text: 'Фактически озвученный ответ', final: true });
   const finalText = 'Подскажите адрес офиса в Астане';
   callbacks.onEvent({ type: 'transcript', role: 'user', itemId: 'input-a', text: finalText, final: true });
   await c.wait(event => event.type === 'transcript' && event.text === finalText);
@@ -259,6 +260,8 @@ test('late final ASR updates saved text and metrics while retaining the exact ro
   assert.equal(record.turns.length, 1);
   const turn = record.turns[0];
   assert.equal(turn.transcript, finalText); assert.equal(turn.trace.transcript, finalText);
+  assert.equal(turn.trace.spoken_transcript, 'Фактически озвученный ответ');
+  assert.notEqual(turn.reply, turn.trace.spoken_transcript, 'verified reply and actual speech transcript remain separate');
   assert.equal(turn.trace.transcript_source, 'provider');
   assert.equal(turn.trace.decision_transcript, routedText); assert.equal(turn.trace.decision_transcript_source, 'route_tool');
   assert.deepEqual(turn.trace.actions, trace.trace.actions, 'late ASR must not rewrite executed decisions');
