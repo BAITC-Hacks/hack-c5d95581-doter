@@ -1,0 +1,8 @@
+node_modules/
+.env
+.env.*
+!.env.example
+artifacts/*
+!artifacts/.gitkeep
+*.log
+.DS_Store
