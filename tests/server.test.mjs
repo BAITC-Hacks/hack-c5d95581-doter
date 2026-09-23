@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { WebSocket } from 'ws';
 import { createApp } from '../server.mjs';
+import { createHistory } from '../lib/history.mjs';
 
 async function fixture(t, options = {}) {
   const app = createApp(options);
@@ -12,8 +13,8 @@ async function fixture(t, options = {}) {
   t.after(() => app.close());
   return { app, base, socketURL: base.replace('http:', 'ws:') + '/ws' };
 }
-async function client(t, url) {
-  const ws = new WebSocket(url, { origin: url.replace('ws:', 'http:').replace('/ws', '') });
+async function client(t, url, options = {}) {
+  const ws = new WebSocket(url, { origin: url.replace('ws:', 'http:').replace('/ws', ''), ...options });
   const messages = [];
   const pending = new Set();
   ws.on('message', raw => {
@@ -184,4 +185,151 @@ test('terminal provider failure stops capture delivery and allows a fresh connec
   await c.wait(e => e.type === 'error' && /Неизвестная команда/.test(e.message));
   assert.equal(audioCalls, 2);
   assert.equal(c.messages.filter(e => e.type === 'status' && e.status === 'stopped').length, 1);
+});
+
+function deferred() {
+  let resolve;
+  const promise = new Promise(done => { resolve = done; });
+  return { promise, resolve };
+}
+const noOpProvider = onEvent => {
+  onEvent({ type: 'status', status: 'ready' });
+  return { close() {}, sendAudio() {}, sendText() {} };
+};
+async function browserCookie(base) {
+  const response = await fetch(base + '/api/config');
+  const header = response.headers.get('set-cookie');
+  assert.match(header, /^vr_owner=[a-f0-9]{64}; HttpOnly; SameSite=Strict; Path=\/; Max-Age=2592000/);
+  return header.split(';')[0];
+}
+
+test('history HTTP access requires the owning browser cookie and never exposes the owner hash', async t => {
+  const { base, socketURL } = await fixture(t, { env: { OPENAI_API_KEY: 'offline-history-key' },
+    connect: async ({ onEvent }) => noOpProvider(onEvent) });
+  const cookie = await browserCookie(base);
+  const c = await client(t, socketURL, { headers: { Cookie: cookie } });
+  c.send({ type: 'start' });
+  const saved = await c.wait(event => event.type === 'history');
+  await c.wait(event => event.status === 'ready');
+  const url = base + '/api/history/' + saved.sessionId;
+  const mine = await fetch(url, { headers: { Cookie: cookie } });
+  assert.equal(mine.status, 200);
+  const record = await mine.json();
+  assert.equal(record.id, saved.sessionId);
+  assert.equal(Object.hasOwn(record, 'ownerHash'), false);
+  assert.equal(JSON.stringify(record).includes(cookie.split('=')[1]), false);
+  assert.equal(JSON.stringify(record).includes('offline-history-key'), false);
+  assert.equal((await fetch(url)).status, 403);
+  const otherCookie = await browserCookie(base);
+  assert.notEqual(otherCookie, cookie);
+  assert.equal((await fetch(url, { headers: { Cookie: otherCookie } })).status, 404);
+  assert.equal((await fetch(base + '/api/history')).status, 404, 'no public session listing');
+  c.send({ type: 'stop' });
+  await c.wait(event => event.status === 'stopped');
+  const ended = await (await fetch(url, { headers: { Cookie: cookie } })).json();
+  assert.ok(ended.endedAt);
+});
+
+test('late final ASR updates saved text and metrics while retaining the exact routing input', async t => {
+  let callbacks;
+  const { base, socketURL } = await fixture(t, { env: { OPENAI_API_KEY: 'offline-history-key' },
+    connect: async options => { callbacks = options; return noOpProvider(options.onEvent); } });
+  const cookie = await browserCookie(base);
+  const c = await client(t, socketURL, { headers: { Cookie: cookie } });
+  c.send({ type: 'start' });
+  const saved = await c.wait(event => event.type === 'history');
+  await c.wait(event => event.status === 'ready');
+  callbacks.onEvent({ type: 'speech_started', itemId: 'input-a' });
+  callbacks.onEvent({ type: 'speech_stopped', itemId: 'input-a' });
+  const routedText = 'Адрес офиса';
+  const decision = { transcript: routedText, scenarios: [{ scenario_id: 'SC33', confidence: .99, reason: 'office request' }],
+    alternatives: [], slots: { city: 'Astana' }, language: 'ru', is_continuation: false, confirmation: 'none' };
+  await callbacks.onRoute(decision, { turnKey: 'input-a' });
+  const trace = await c.wait(event => event.type === 'trace');
+  callbacks.onEvent({ type: 'audio', itemId: 'output-a', data: Buffer.alloc(960).toString('base64'), sampleRate: 24000 });
+  await c.wait(event => event.type === 'audio');
+  c.send({ type: 'playback_started', turnId: trace.turnId });
+  const played = await c.wait(event => event.type === 'metrics' && event.latency_ms.end_to_first_audio !== null);
+  const finalText = 'Подскажите адрес офиса в Астане';
+  callbacks.onEvent({ type: 'transcript', role: 'user', itemId: 'input-a', text: finalText, final: true });
+  await c.wait(event => event.type === 'transcript' && event.text === finalText);
+  const finalMetrics = await c.wait(event => event.type === 'metrics' && event.latency_ms.transcript !== null);
+  c.send({ type: 'stop' }); await c.wait(event => event.status === 'stopped');
+  const record = await (await fetch(base + '/api/history/' + saved.sessionId, { headers: { Cookie: cookie } })).json();
+  assert.equal(record.turns.length, 1);
+  const turn = record.turns[0];
+  assert.equal(turn.transcript, finalText); assert.equal(turn.trace.transcript, finalText);
+  assert.equal(turn.trace.transcript_source, 'provider');
+  assert.equal(turn.trace.decision_transcript, routedText); assert.equal(turn.trace.decision_transcript_source, 'route_tool');
+  assert.deepEqual(turn.trace.actions, trace.trace.actions, 'late ASR must not rewrite executed decisions');
+  assert.equal(turn.latency.transcript, finalMetrics.latency_ms.transcript);
+  assert.equal(turn.latency.end_to_first_audio, played.latency_ms.end_to_first_audio);
+  assert.equal(turn.latency.stt, null); assert.equal(turn.latency.tts, null);
+});
+
+test('closing a socket permanently discards a queued second start after a delayed provider connect', async t => {
+  const history = createHistory({ env: {} });
+  const connected = deferred(), release = deferred(), ended = deferred(), providerClosed = deferred();
+  let connects = 0, closes = 0;
+  const observedHistory = { ...history, endSession: async id => { await history.endSession(id); ended.resolve(); } };
+  const { socketURL } = await fixture(t, { env: { OPENAI_API_KEY: 'offline-key' }, history: observedHistory,
+    connect: async () => { connects++; connected.resolve(); await release.promise;
+      return { close() { closes++; providerClosed.resolve(); }, sendAudio() {}, sendText() {} }; } });
+  const c = await client(t, socketURL);
+  try {
+    c.send({ type: 'start' }); c.send({ type: 'start' });
+    await connected.promise;
+    c.ws.close(); await ended.promise;
+    release.resolve(); await providerClosed.promise;
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(connects, 1); assert.equal(closes, 1);
+    const sessions = await history.listSessions();
+    assert.equal(sessions.length, 1); assert.ok(sessions[0].endedAt);
+  } finally { release.resolve(); }
+});
+
+test('slow audit start stays off the voice path and session, turn, end writes keep their order', async t => {
+  const history = createHistory({ env: {} });
+  const release = deferred(), ended = deferred();
+  const order = []; let callbacks;
+  const observedHistory = { ...history,
+    startSession: async record => { await release.promise; order.push('start'); return history.startSession(record); },
+    saveTurn: async record => { order.push('turn'); return history.saveTurn(record); },
+    endSession: async id => { order.push('end'); await history.endSession(id); ended.resolve(); } };
+  const { socketURL } = await fixture(t, { env: { OPENAI_API_KEY: 'offline-key' }, history: observedHistory,
+    connect: async options => { callbacks = options; return noOpProvider(options.onEvent); } });
+  const c = await client(t, socketURL);
+  try {
+    c.send({ type: 'start' }); await c.wait(event => event.status === 'ready');
+    callbacks.onEvent({ type: 'speech_started', itemId: 'audit-input' });
+    await callbacks.onRoute({ transcript: 'Погода', scenarios: [{ scenario_id: 'SYS_OUT_OF_SCOPE', confidence: .99, reason: 'unrelated' }],
+      alternatives: [], slots: {}, language: 'ru', is_continuation: false, confirmation: 'none' }, { turnKey: 'audit-input' });
+    await c.wait(event => event.type === 'trace');
+    assert.deepEqual(order, [], 'database insert is still blocked while the voice turn completes');
+    c.send({ type: 'stop' }); await c.wait(event => event.status === 'stopped');
+    release.resolve(); await ended.promise;
+    assert.deepEqual(order, ['start', 'turn', 'end']);
+    const [saved] = await history.listSessions();
+    assert.equal(saved.turnCount, 1); assert.ok(saved.endedAt);
+  } finally { release.resolve(); }
+});
+
+test('runtime audit failure is a nonterminal status even while the voice provider is connecting', async t => {
+  let closes = 0;
+  const release = deferred();
+  const history = { ready: Promise.resolve(), status: { backend: 'postgres', persistent: true, available: false },
+    async startSession() { throw new Error('postgresql://user:secret-value@database/voice'); },
+    async endSession() {}, async close() {} };
+  const { socketURL } = await fixture(t, { env: { OPENAI_API_KEY: 'offline-key' }, history,
+    connect: async ({ onEvent }) => { await release.promise; const provider = noOpProvider(onEvent); provider.close = () => { closes++; }; return provider; } });
+  const c = await client(t, socketURL);
+  try {
+    c.send({ type: 'start' });
+    const warning = await c.wait(event => event.status === 'history_unavailable');
+    assert.equal(warning.type, 'status'); assert.match(warning.message, /историю/);
+    assert.ok(!warning.message.includes('secret-value'));
+    assert.equal(c.messages.some(event => event.type === 'error' || event.status === 'stopped'), false);
+    release.resolve(); await c.wait(event => event.status === 'ready');
+    assert.equal(closes, 0);
+  } finally { release.resolve(); }
 });

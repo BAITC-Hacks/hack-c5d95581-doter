@@ -244,3 +244,149 @@ test('new A to B to A contact updates each confirm and execute while delivery re
  }
  assert.equal(new Set(ids).size,3);
 });
+
+
+test('policy knowledge selects the requested fact in Russian and Kazakh with an exact source path',()=>{
+ const cases=[
+  {language:'ru',topic:'До какого возраста можно страховать автомобиль?',product_type:'casco',part:'Максимальный возраст',path:'products/casco/pricing/max_car_age/Standard'},
+  {language:'kk',topic:'КАСКО көлік жасы қаншаға дейін?',product_type:'casco',part:'Көліктің ең жоғары жасы',path:'products/casco/pricing/max_car_age/Standard'},
+  {language:'kk',topic:'КАСКО нені өтемейді?',product_type:'casco',part:'мас күйінде',path:'products/casco/exclusions'},
+  {language:'ru',topic:'Что покрывает пакет Лайт?',product_type:'casco',part:'только угон и полная гибель',path:'products/casco/packages/Lite'},
+  {language:'kk',topic:'Сапар сақтандыруының лимиті қандай?',product_type:'travel',part:'30 000 EUR',path:'products/travel/zones/B/coverage'},
+ ];
+ for(const item of cases){
+  const out=turn(createSession(data),'SC40',{topic:item.topic,product_type:item.product_type},{language:item.language},item.topic);
+  assert.equal(out.trace.status,'completed');
+  assert.ok(out.reply.includes(item.part),out.reply);
+  const lookup=out.trace.actions.find(a=>a.name==='kb_lookup').result;
+  assert.ok(lookup.sources.includes('knowledge_base.json#/'+item.path));
+  for(const fact of lookup.facts){
+   const parts=fact.path.split('#/')[1].split('/').map(s=>s.replaceAll('~1','/').replaceAll('~0','~'));
+   assert.deepEqual(fact.value,parts.reduce((value,part)=>value[part],data.knowledge));
+  }
+ }
+});
+
+test('unknown policy topics and missing definitions abstain instead of returning generic coverage',()=>{
+ for(const [language,topic]of [['ru','Какая погода завтра?'],['kk','Ертең ауа райы қандай?'],['ru','Что такое франшиза?']]){
+  const out=turn(createSession(data),'SC40',{product_type:'casco',topic},{language},topic);
+  const lookup=out.trace.actions.find(a=>a.name==='kb_lookup').result;
+  assert.equal(lookup.error.code,'not_found');assert.deepEqual(lookup.sources,[]);
+  assert.equal(out.reply,lookup.answer);
+  assert.ok(!out.reply.includes('покрывает ущерб'));
+  assert.equal(out.trace.actions.some(a=>a.mode==='execute'),false);
+ }
+});
+
+test('policy facts follow changes to the knowledge data and never reuse a stale translation',()=>{
+ const changed=structuredClone(data);
+ changed.knowledge.products.casco.pricing.max_car_age.Standard=12;
+ const out=turn(createSession(changed),'SC40',{product_type:'casco',topic:'Максимальный возраст автомобиля Стандарт'});
+ assert.match(out.reply,/12 лет/);assert.doesNotMatch(out.reply,/10 лет|15 лет/);
+ assert.equal(out.trace.actions[0].result.facts[0].value,12);
+ assert.equal(data.knowledge.products.casco.pricing.max_car_age.Standard,10);
+ changed.knowledge.products.casco.exclusions=['A newly added condition without an approved translation'];
+ const unavailable=turn(createSession(changed),'SC40',{product_type:'casco',topic:'Исключения'});
+ assert.equal(unavailable.trace.actions[0].result.error.code,'not_found');
+ assert.ok(!unavailable.reply.includes('опьянения'));
+});
+
+const operatorContext=out=>out.trace.actions.find(a=>a.name==='transfer_to_operator').result.context;
+const contextKeys=['reason','latest_request','client_id','scenario_id','active_scenario','queued_scenarios','suspended_scenarios','slots','scenario_slots','latest_action','pending_confirmation','confirmation_status','summary'].sort();
+
+test('ordinary handoff includes suspended and queued topics and an honestly cancelled preview',()=>{
+ const s=createSession(data);turn(s,'SC29',emailChange);
+ const before=structuredClone(s.backend);
+ const request='Соедините с оператором, затем нужен адрес офиса';
+ const out=processTurn(s,decision('SC37',{city:'Astana'},{scenarios:[
+  {scenario_id:'SC37',confidence:.99,reason:'operator request'},
+  {scenario_id:'SC33',confidence:.95,reason:'office afterwards'}
+ ]}),{turnId:'handoff-request',transcript:request});
+ assert.equal(out.trace.status,'handoff');
+ const context=operatorContext(out);
+ assert.deepEqual(Object.keys(context).sort(),contextKeys);
+ assert.equal(context.reason,'customer_requested');assert.equal(context.latest_request,request);
+ assert.equal(context.active_scenario,'SC37');
+ assert.deepEqual(context.queued_scenarios,['SC33']);assert.deepEqual(context.suspended_scenarios,['SC29']);
+ assert.equal(context.scenario_slots.SC33.city,'Astana');
+ assert.equal(context.scenario_slots.SC29.new_value,emailChange.new_value);
+ assert.equal(context.latest_action.name,'update_contact');assert.equal(context.latest_action.mode,'preview');
+ assert.equal(context.pending_confirmation,null);assert.equal(context.confirmation_status,'cancelled');
+ assert.deepEqual(s.backend,before);
+ assert.deepEqual(s.journal.find(x=>x.name==='transfer_to_operator').context,context);
+});
+
+test('uncertainty handoff uses the same context schema and preserves the latest customer request',()=>{
+ const s=createSession(data);
+ const uncertain={scenarios:[{scenario_id:'SC33',confidence:.2,reason:'ambiguous'}]};
+ turn(s,'SC33',{},uncertain,'Первый непонятный запрос');
+ const out=turn(s,'SC33',{},uncertain,'Уточнить не получается');
+ const context=operatorContext(out);
+ assert.equal(out.trace.status,'handoff');assert.deepEqual(Object.keys(context).sort(),contextKeys);
+ assert.equal(context.reason,'low_confidence');assert.equal(context.latest_request,'Уточнить не получается');
+ assert.equal(context.latest_action,null);assert.equal(context.pending_confirmation,null);
+ assert.equal(s.journal.filter(x=>x.name==='transfer_to_operator').length,1);
+});
+
+test('failed preview handoff records the failure and cannot claim a successful booking',()=>{
+ const s=createSession(data),before=structuredClone(s.backend);
+ const slots={policy_number:'SQ-DMS-604220',doctor_specialty:'therapist',city:'Astana',preferred_date:'2026-10-02'};
+ const out=processTurn(s,decision('SC21',slots),{turnId:'failed-booking',transcript:'Нужна запись к терапевту'});
+ const context=operatorContext(out);
+ assert.equal(out.trace.status,'handoff');assert.deepEqual(Object.keys(context).sort(),contextKeys);
+ assert.equal(context.reason,'action_failed:no_availability');assert.equal(context.active_scenario,'SC21');
+ assert.equal(context.latest_action.name,'book_appointment');assert.equal(context.latest_action.mode,'preview');
+ assert.equal(context.latest_action.turn_id,'failed-booking');assert.equal(context.latest_action.result.error.code,'no_availability');
+ assert.equal(context.pending_confirmation,null);assert.deepEqual(s.backend,before);
+ assert.equal(out.trace.actions.some(a=>a.name==='book_appointment'&&a.mode==='execute'),false);
+ assert.deepEqual(processTurn(s,decision('SC21',slots),{turnId:'failed-booking',transcript:'Повтор'}),out);
+ assert.equal(s.journal.filter(x=>x.name==='transfer_to_operator').length,1);
+});
+
+
+test('handoff retains the latest action across intervening clarification-only turns',()=>{
+ const s=createSession(data);
+ processTurn(s,decision('SC33',{city:'Astana'}),{turnId:'known-office',transcript:'Адрес офиса в Астане'});
+ const uncertain={scenarios:[{scenario_id:'SC33',confidence:.2,reason:'ambiguous'}]};
+ turn(s,'SC33',{},uncertain,'Первый непонятный запрос');
+ const out=turn(s,'SC33',{},uncertain,'Нужна помощь');
+ const context=operatorContext(out);
+ assert.equal(context.latest_action.name,'get_offices');
+ assert.equal(context.latest_action.turn_id,'known-office');
+ assert.equal(context.latest_action.mode,'read');
+ assert.equal(context.latest_request,'Нужна помощь');
+});
+
+
+test('policy knowledge distinguishes Kazakh payment verbs from vehicle age',()=>{
+ const request='Көлікке қандай жағдайда төлем жасамайсыздар?';
+ const out=turn(createSession(data),'SC40',{topic:request,product_type:'casco'},{language:'kk'},request);
+ const lookup=out.trace.actions.find(a=>a.name==='kb_lookup').result;
+ assert.equal(out.trace.status,'completed');
+ assert.deepEqual(lookup.sources,['knowledge_base.json#/products/casco/exclusions']);
+ assert.match(out.reply,/мас күйінде/);
+ assert.doesNotMatch(out.reply,/ең жоғары жасы/);
+ const age='Қанша жастағы көлік КАСКО бойынша сақтандырылады?';
+ const ageOut=turn(createSession(data),'SC40',{topic:age,product_type:'casco'},{language:'kk'},age);
+ assert.match(ageOut.reply,/Көліктің ең жоғары жасы/);
+});
+
+test('policy knowledge refuses deductible definitions and answers explicit amount questions',()=>{
+ for(const [language,topic]of [
+  ['ru','Что означает франшиза?'],['kk','Франшиза дегеніміз не?'],
+  ['ru','Что означает размер франшизы?'],['ru','Можно ли изменить франшизу после оформления?']
+ ]){
+  const out=turn(createSession(data),'SC40',{product_type:'casco',topic},{language},topic);
+  const lookup=out.trace.actions.find(a=>a.name==='kb_lookup').result;
+  assert.equal(lookup.error.code,'not_found',topic);
+  assert.deepEqual(lookup.sources,[]);
+  assert.equal(out.reply,lookup.answer);
+ }
+ for(const [language,topic]of [['ru','Какие размеры франшизы доступны?'],['kk','Франшиза мөлшері қанша?']]){
+  const out=turn(createSession(data),'SC40',{product_type:'casco',topic},{language},topic);
+  const lookup=out.trace.actions.find(a=>a.name==='kb_lookup').result;
+  assert.equal(out.trace.status,'completed',topic);
+  assert.deepEqual(lookup.sources,['knowledge_base.json#/products/casco/pricing/franchise_coef']);
+  assert.match(out.reply,/0, 50000, 100000/);
+ }
+});

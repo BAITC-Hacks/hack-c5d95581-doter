@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { performance } from 'node:perf_hooks';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, randomBytes, createHash } from 'node:crypto';
 import { WebSocketServer, WebSocket } from 'ws';
 import { loadData, publicCatalog } from './lib/catalog.mjs';
 import { buildInstructions, makeToolSchema } from './lib/prompts.mjs';
@@ -11,18 +11,25 @@ import { createSession, processTurn } from './lib/engine.mjs';
 import { connectProvider } from './lib/providers.mjs';
 import { discoverModels } from './lib/models.mjs';
 import { providerGuidance, withModelGuidance } from './lib/model-guidance.mjs';
+import { createHistory } from './lib/history.mjs';
 
 const publicRoot = path.resolve(fileURLToPath(new URL('./public/', import.meta.url)));
-const mime = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.ico': 'image/x-icon' };
+const mime = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.woff2': 'font/woff2', '.ttf': 'font/ttf', '.ico': 'image/x-icon' };
 const monotonic = () => performance.now();
 const rounded = n => Number.isFinite(n) && n >= 0 ? Math.round(n) : null;
 
-export function createApp({ data = loadData(), connect = connectProvider, env = process.env, modelDiscovery = discoverModels } = {}) {
+export function createApp({ data = loadData(), connect = connectProvider, env = process.env, modelDiscovery = discoverModels, history: suppliedHistory } = {}) {
   const settings = {
     openai: { apiKey: env.OPENAI_API_KEY || '', model: env.OPENAI_REALTIME_MODEL || 'gpt-realtime-2.1', inputSampleRate: 24000 },
     gemini: { apiKey: env.GEMINI_API_KEY || env.GOOGLE_API_KEY || '', model: env.GEMINI_LIVE_MODEL || 'gemini-3.8-live', inputSampleRate: 16000 },
   };
   const config = { providers: Object.fromEntries(Object.entries(settings).map(([name, s]) => [name, { configured: Boolean(s.apiKey.trim()), model: s.model, models: withModelGuidance([{ id: s.model, label: s.model }]), guidance: providerGuidance(name), verified: false }])), catalog: publicCatalog(data), asOfDate: data.scenarios.meta.as_of_date };
+  const history = suppliedHistory || createHistory({ env });
+  const historyJobs = new Set();
+  const historyStatus = () => ({ enabled: true, backend: history.status.backend, persistent: history.status.persistent, available: history.status.available });
+  Object.defineProperty(config, 'history', { enumerable: true, get: historyStatus });
+  const ownerToken = req => (req.headers.cookie || '').split(';').map(s => s.trim()).find(s => /^vr_owner=[a-f0-9]{64}$/.test(s))?.slice(9) || null;
+  const ownerHash = req => { const token = ownerToken(req); return token ? createHash('sha256').update(token).digest('hex') : null; };
   const instructions = buildInstructions(data);
   const toolSchema = makeToolSchema(data);
   const active = new Set();
@@ -31,16 +38,33 @@ export function createApp({ data = loadData(), connect = connectProvider, env = 
     for (const s of Object.values(settings)) if (s.apiKey) message = message.split(s.apiKey).join('[redacted]');
     return message.replace(/(key=|Bearer\s+|sk-)[^\s&"']+/gi, '$1[redacted]');
   }
-  function json(res, status, body) {
-    res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+  function json(res, status, body, headers = {}) {
+    res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', ...headers });
     res.end(JSON.stringify(body));
   }
   const server = http.createServer(async (req, res) => {
     if (req.method !== 'GET' && req.method !== 'HEAD') return json(res, 405, { error: 'Method not allowed' });
     let pathname;
     try { pathname = decodeURIComponent(new URL(req.url, 'http://localhost').pathname); } catch { return json(res, 400, { error: 'Invalid URL' }); }
-    if (pathname === '/api/config') return json(res, 200, config);
-    if (pathname === '/api/health') return json(res, 200, { status: 'ok', scenarios: 40, api: config.providers });
+    if (pathname === '/api/config') {
+      const secure = req.socket.encrypted || req.headers['x-forwarded-proto'] === 'https';
+      const headers = ownerToken(req) ? {} : { 'Set-Cookie': `vr_owner=${randomBytes(32).toString('hex')}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000${secure ? '; Secure' : ''}` };
+      return json(res, 200, config, headers);
+    }
+    if (pathname === '/api/health') return json(res, 200, { status: 'ok', scenarios: 40, api: config.providers, history: historyStatus() });
+    if (pathname.startsWith('/api/history/')) {
+      const owner = ownerHash(req);
+      if (!owner) return json(res, 403, { error: 'Откройте историю в браузере, в котором шёл разговор.' });
+      const id = pathname.slice('/api/history/'.length);
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) return json(res, 404, { error: 'Диалог не найден.' });
+      try {
+        await history.ready;
+        const saved = await history.getSession(id, { ownerHash: owner });
+        if (!saved || saved.ownerHash !== owner) return json(res, 404, { error: 'Диалог не найден в истории этого браузера.' });
+        const { ownerHash: omitted, ...record } = saved;
+        return json(res, 200, { ...record, storage: historyStatus() });
+      } catch { return json(res, 503, { error: 'Хранилище истории временно недоступно.' }); }
+    }
     const relative = pathname === '/' ? 'index.html' : pathname.slice(1);
     const target = path.resolve(publicRoot, relative);
     if (target !== publicRoot && !target.startsWith(publicRoot + path.sep)) return json(res, 403, { error: 'Forbidden' });
@@ -63,18 +87,33 @@ export function createApp({ data = loadData(), connect = connectProvider, env = 
     wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws, req));
   });
 
-  wss.on('connection', ws => {
+  wss.on('connection', (ws, req) => {
+    const historyOwner = ownerHash(req);
     let session = createSession(data, { id: randomUUID() });
     let connection = null;
     let provider = 'openai';
     let generation = 0;
     let started = false;
+    let socketClosed = false;
     let turnCounter = 0;
     let current = null;
     let lastDecision = null;
     let routeCalls = 0;
     let commandQueue = Promise.resolve();
     let suppressProviderInterrupt = false;
+    let historySession = null;
+    let historyQueue = Promise.resolve();
+    function queueHistory(work) {
+      const job = historyQueue.then(work).catch(() => send({ type: 'status', status: 'history_unavailable', message: 'Не удалось сохранить историю. Голосовой диалог продолжается; проверьте подключение к базе данных.' }));
+      historyQueue = job;
+      historyJobs.add(job);
+      job.finally(() => historyJobs.delete(job));
+    }
+    function persistTurn(turn) {
+      if (!turn?.historyRecord) return;
+      const record = structuredClone({ ...turn.historyRecord, latency: metrics(turn) });
+      queueHistory(() => history.saveTurn(record));
+    }
     const turns = new Map();
     const providerTurns = new Map();
     const send = event => {
@@ -105,10 +144,12 @@ export function createApp({ data = loadData(), connect = connectProvider, env = 
       const old = connection;
       connection = null;
       old?.close();
+      if (historySession) { const id = historySession; historySession = null; queueHistory(() => history.endSession(id)); }
       current = null;
     }
     active.add(stop);
     async function start(name, requestedModel) {
+      if (socketClosed || ws.readyState !== WebSocket.OPEN) return;
       if (!Object.hasOwn(settings, name)) throw new Error('Выберите OpenAI или Gemini.');
       stop();
       provider = name;
@@ -123,11 +164,17 @@ export function createApp({ data = loadData(), connect = connectProvider, env = 
       turnCounter = 0;
       started = true;
       const token = generation;
+      const sessionId = session.id;
+      const historyRecord = { id: sessionId, provider, model: selectedModel, ownerHash: historyOwner || undefined };
+      historySession = sessionId;
+      // Start, turn upserts and end share one ordered queue; the voice path never waits for an audit write.
+      queueHistory(async () => { await history.ready; await history.startSession(historyRecord); });
+      if (historyOwner) send({ type: 'history', sessionId, url: `/history.html?id=${sessionId}`, persistent: history.status.persistent });
       send({ type: 'status', status: 'connecting', provider, inputSampleRate: s.inputSampleRate, outputSampleRate: 24000 });
       const conn = await connect({
         provider, apiKey: s.apiKey, model: s.model, instructions, toolSchema,
         onEvent(event) {
-          if (token !== generation || !started) return;
+          if (socketClosed || token !== generation || !started) return;
           if (event.type === 'playback_cutoff_request') {
             if (current?.playback !== null && current?.audioItem) connection?.reportPlayback?.({ itemId: current.audioItem, audioEndMs: Math.max(0, monotonic() - current.playback) });
             return;
@@ -157,6 +204,12 @@ export function createApp({ data = loadData(), connect = connectProvider, env = 
               turn.text = event.text;
               turn.userFinal = Boolean(event.final);
               if (event.final && turn.transcriptAt === null) turn.transcriptAt = monotonic();
+              if (event.final && turn.historyRecord && typeof event.text === 'string' && event.text) {
+                turn.historyRecord.transcript = event.text;
+                turn.historyRecord.trace.transcript = event.text;
+                turn.historyRecord.trace.transcript_source = 'provider';
+                persistTurn(turn);
+              }
             }
             send({ ...event, turnId: turn.id });
             if (event.final) send({ type: 'metrics', turnId: turn.id, latency_ms: metrics(turn) });
@@ -174,7 +227,7 @@ export function createApp({ data = loadData(), connect = connectProvider, env = 
           }
         },
         async onRoute(decision, context = {}) {
-          if (token !== generation || !started) return { reply: '', trace: {}, state: {} };
+          if (socketClosed || token !== generation || !started) return { reply: '', trace: {}, state: {} };
           if (!current) beginTurn();
           const turn = context.turnKey ? providerTurns.get(context.turnKey) : current;
           if (!turn || turn !== current) return { reply: '', trace: {}, state: {} };
@@ -193,14 +246,19 @@ export function createApp({ data = loadData(), connect = connectProvider, env = 
           lastDecision = structuredClone(decision);
           result.trace.transcript = utterance;
           result.trace.transcript_source = turn.userFinal ? 'provider' : 'route_tool';
+          result.trace.decision_transcript = utterance;
+          result.trace.decision_transcript_source = result.trace.transcript_source;
+          turn.historyRecord = { sessionId: session.id, turnId: turn.id, transcript: utterance, reply: result.reply, trace: structuredClone(result.trace), state: structuredClone(result.state) };
+          persistTurn(turn);
           send({ type: 'trace', turnId: turn.id, trace: result.trace, state: result.state, latency_ms: metrics(turn) });
           return result;
         },
       });
-      if (token !== generation || !started) { conn.close(); return; }
+      if (socketClosed || ws.readyState !== WebSocket.OPEN || token !== generation || !started) { conn.close(); return; }
       connection = conn;
     }
     async function command(message) {
+      if (socketClosed || ws.readyState !== WebSocket.OPEN) return;
       if (!message || typeof message !== 'object' || Array.isArray(message)) throw new Error('Некорректная команда.');
       switch (message.type) {
         case 'start': await start(message.provider || 'openai', message.model); break;
@@ -234,6 +292,7 @@ export function createApp({ data = loadData(), connect = connectProvider, env = 
       }
     }
     ws.on('message', (raw, binary) => {
+      if (socketClosed || ws.readyState !== WebSocket.OPEN) return;
       if (binary) return fail('Ожидалось JSON-сообщение.');
       let message;
       try { message = JSON.parse(raw.toString()); } catch { return fail('Некорректный JSON.'); }
@@ -245,6 +304,7 @@ export function createApp({ data = loadData(), connect = connectProvider, env = 
         const turn = turns.get(message.turnId);
         if (turn && turn.playback === null && turn.firstAudio !== null) {
           turn.playback = monotonic();
+          persistTurn(turn);
           if (turn.audioItem) connection?.reportPlayback?.({ itemId: turn.audioItem, audioEndMs: 0 });
           send({ type: 'metrics', turnId: turn.id, latency_ms: metrics(turn) });
         }
@@ -255,14 +315,22 @@ export function createApp({ data = loadData(), connect = connectProvider, env = 
         });
       }
     });
-    ws.on('error', () => stop());
-    ws.on('close', () => { stop(); active.delete(stop); });
+    function closeSocket() {
+      if (socketClosed) return;
+      socketClosed = true;
+      stop();
+      active.delete(stop);
+    }
+    ws.on('error', closeSocket);
+    ws.on('close', closeSocket);
   });
   async function close() {
     for (const stop of active) stop();
     for (const ws of wss.clients) ws.close(1001, 'Server shutdown');
     wss.close();
     await new Promise(resolve => server.close(resolve));
+    await Promise.allSettled([...historyJobs]);
+    await history.close();
   }
   async function refreshModels() {
     await Promise.all(Object.entries(settings).map(async ([name, s]) => {
@@ -271,13 +339,14 @@ export function createApp({ data = loadData(), connect = connectProvider, env = 
       if (!discovered.models.some(m => m.id === config.providers[name].model)) config.providers[name].model = discovered.models[0]?.id || s.model;
     }));
   }
-  return { server, close, config, refreshModels };
+  return { server, close, config, refreshModels, ready: history.ready };
 }
 
 if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
   const app = createApp();
   const port = Number(process.env.PORT || 3000);
   const host = process.env.HOST || '127.0.0.1';
+  await app.ready;
   await app.refreshModels();
   app.server.listen(port, host, () => console.log(`Voice Router: http://${host}:${port}`));
   for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => app.close().then(() => process.exit(0)));

@@ -1,0 +1,36 @@
+services:
+  app:
+    build: .
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${PORT:-3000}:3000"
+    environment:
+      HOST: 0.0.0.0
+      PORT: 3000
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      OPENAI_REALTIME_MODEL: ${OPENAI_REALTIME_MODEL:-gpt-realtime-2.1}
+      GEMINI_LIVE_MODEL: ${GEMINI_LIVE_MODEL:-gemini-3.8-live}
+      DATABASE_URL: postgresql://voice_router:${POSTGRES_PASSWORD:-voice_router_local_only}@postgres:5432/voice_router
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 20s
+  postgres:
+    image: postgres:17-bookworm
+    environment:
+      POSTGRES_USER: voice_router
+      POSTGRES_DB: voice_router
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-voice_router_local_only}
+    volumes:
+      - history_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U voice_router -d voice_router"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+volumes:
+  history_data:

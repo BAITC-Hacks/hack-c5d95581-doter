@@ -1,0 +1,12 @@
+node_modules
+.git
+.env
+.env.*
+!.env.example
+artifacts
+evaluation
+tests
+tools
+*.log
+coverage
+README.md
