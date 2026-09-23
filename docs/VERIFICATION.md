@@ -28,6 +28,10 @@
 
 Полный результат 103/104 primary и 102/104 full относится к prompt ревизии `44b279c`. После прогона у SC40 явно отмечен обязательный `product_type`; полный показатель новой редакции не измерялся. [Сохранённый отчёт](evaluation-results.json) и [предсказания](evaluation-predictions.json) позволяют пересчитать исходный результат без API. Данные оценки не включаются в runtime prompt.
 
+## Развёрнутое демо
+
+[Публичное демо](https://hackalem.s-madaminov.tech) работает без логина и пароля. Проверены HTTPS, `/api/config`, выдача логотипа и WebSocket upgrade без заголовка Authorization. Приложение и PostgreSQL прошли health checks. Проверки доступа к истории вернули ожидаемые 200/403/404 для своего, отсутствующего и чужого владельца.
+
 ## Воспроизведение
 
 ```sh
@@ -36,4 +40,4 @@ npm test
 python -X utf8 evaluation/evaluate.py docs/evaluation-predictions.json evaluation/dev_utterances.json
 ```
 
-Настройте `.env` и выполните `docker compose up --build -d` для запуска приложения с PostgreSQL. Реальные Live/API-проверки отдельно описаны в [README](../README.md) и расходуют квоту провайдера. HTTP health check сам по себе не доказывает работу микрофона, голосовой модели или внешнего доступа из любой сети.
+В приватном клоне выполните `docker compose --env-file .env.jury up --build -d --wait` с включённой конфигурацией жюри для запуска приложения с PostgreSQL. Реальные Live/API-проверки отдельно описаны в [README](../README.md) и расходуют квоту провайдера. HTTP health check сам по себе не доказывает работу микрофона, голосовой модели или внешнего доступа из любой сети.

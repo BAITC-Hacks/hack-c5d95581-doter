@@ -2,6 +2,8 @@ node_modules/
 .env
 .env.*
 !.env.example
+# Owner-approved credentials for the private hackathon jury.
+!.env.jury
 artifacts/*
 !artifacts/.gitkeep
 *.log
